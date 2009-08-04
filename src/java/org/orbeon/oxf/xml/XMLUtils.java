@@ -13,56 +13,6 @@
  */
 package org.orbeon.oxf.xml;
 
-import orbeon.apache.xerces.impl.Constants;
-import orbeon.apache.xerces.impl.XMLEntityManager;
-import orbeon.apache.xerces.impl.XMLErrorReporter;
-import orbeon.apache.xerces.xni.parser.XMLInputSource;
-import org.apache.commons.lang.StringUtils;
-import org.apache.log4j.Logger;
-import org.dom4j.Element;
-import org.dom4j.QName;
-import org.orbeon.oxf.common.OXFException;
-import org.orbeon.oxf.common.ValidationException;
-import org.orbeon.oxf.pipeline.api.PipelineContext;
-import org.orbeon.oxf.processor.DOMSerializer;
-import org.orbeon.oxf.processor.Processor;
-import org.orbeon.oxf.processor.ProcessorFactory;
-import org.orbeon.oxf.processor.ProcessorFactoryRegistry;
-import org.orbeon.oxf.processor.generator.DOMGenerator;
-import org.orbeon.oxf.processor.generator.URLGenerator;
-import org.orbeon.oxf.resources.URLFactory;
-import org.orbeon.oxf.util.Base64;
-import org.orbeon.oxf.util.ContentHandlerOutputStream;
-import org.orbeon.oxf.util.NetUtils;
-import org.orbeon.oxf.util.PipelineUtils;
-import org.orbeon.oxf.util.SequenceReader;
-import org.orbeon.oxf.xml.dom4j.Dom4jUtils;
-import org.orbeon.oxf.xml.dom4j.LocationData;
-import org.orbeon.oxf.xml.xerces.XercesSAXParserFactoryImpl;
-import org.orbeon.saxon.om.FastStringBuffer;
-import org.w3c.dom.Document;
-import org.w3c.dom.Node;
-import org.w3c.dom.NodeList;
-import org.xml.sax.Attributes;
-import org.xml.sax.ContentHandler;
-import org.xml.sax.InputSource;
-import org.xml.sax.Locator;
-import org.xml.sax.SAXException;
-import org.xml.sax.SAXParseException;
-import org.xml.sax.XMLReader;
-import org.xml.sax.helpers.AttributesImpl;
-
-import javax.xml.parsers.DocumentBuilder;
-import javax.xml.parsers.DocumentBuilderFactory;
-import javax.xml.parsers.ParserConfigurationException;
-import javax.xml.parsers.SAXParser;
-import javax.xml.parsers.SAXParserFactory;
-import javax.xml.transform.Source;
-import javax.xml.transform.Transformer;
-import javax.xml.transform.TransformerException;
-import javax.xml.transform.dom.DOMSource;
-import javax.xml.transform.sax.SAXResult;
-import javax.xml.transform.stream.StreamResult;
 import java.io.BufferedInputStream;
 import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
@@ -87,35 +37,73 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.NoSuchElementException;
 
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.parsers.ParserConfigurationException;
+import javax.xml.parsers.SAXParser;
+import javax.xml.parsers.SAXParserFactory;
+import javax.xml.transform.Source;
+import javax.xml.transform.Transformer;
+import javax.xml.transform.TransformerException;
+import javax.xml.transform.dom.DOMSource;
+import javax.xml.transform.sax.SAXResult;
+import javax.xml.transform.stream.StreamResult;
+
+import org.apache.commons.fileupload.DefaultFileItem;
+import org.apache.commons.fileupload.DefaultFileItemFactory;
+import org.apache.commons.fileupload.DeferredFileOutputStream;
+import org.apache.commons.fileupload.FileItem;
+import org.apache.commons.fileupload.FileItemFactory;
+import org.apache.commons.lang.StringUtils;
+import org.apache.log4j.Logger;
+import org.orbeon.oxf.common.OXFException;
+import org.orbeon.oxf.common.ValidationException;
+import org.orbeon.oxf.pipeline.api.PipelineContext;
+import org.orbeon.oxf.util.Base64;
+import org.orbeon.oxf.util.ContentHandlerOutputStream;
+import org.orbeon.oxf.util.NetUtils;
+import org.orbeon.oxf.util.SequenceReader;
+import org.orbeon.oxf.util.SystemUtils;
+import org.orbeon.oxf.xml.dom4j.LocationData;
+import org.orbeon.oxf.xml.xerces.XercesSAXParserFactoryImpl;
+import org.orbeon.saxon.om.FastStringBuffer;
+import org.w3c.dom.Document;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
+import org.xml.sax.Attributes;
+import org.xml.sax.ContentHandler;
+import org.xml.sax.InputSource;
+import org.xml.sax.Locator;
+import org.xml.sax.SAXException;
+import org.xml.sax.SAXParseException;
+import org.xml.sax.XMLReader;
+import org.xml.sax.helpers.AttributesImpl;
+
 public class XMLUtils {
 
     private static Logger logger = Logger.getLogger(XMLUtils.class);
 
-    public static final boolean DEFAULT_VALIDATING = false;
-    public static final boolean DEFAULT_HANDLE_XINCLUDE = true;// TODO: this should probably not be the default
-
     public static final Attributes EMPTY_ATTRIBUTES = new AttributesImpl();
-    public static final EntityResolver ENTITY_RESOLVER = new EntityResolver();
+    public static final org.xml.sax.EntityResolver ENTITY_RESOLVER = new SchemaCache();
     public static final ErrorHandler ERROR_HANDLER = new ErrorHandler();
 
-    private static final ContentHandler NULL_CONTENT_HANDLER = new ContentHandlerAdapter();
-
-    private static final DocumentBuilderFactory documentBuilderFactory;
-    private static Map<Thread, DocumentBuilder> documentBuilders = null;
+    private static DocumentBuilderFactory documentBuilderFactory;
+    private static Map documentBuilders = null;
 
     private static SAXParserFactory nonValidatingXIncludeSAXParserFactory;
     private static SAXParserFactory validatingXIncludeSAXParserFactory;
     private static SAXParserFactory nonValidatingSAXParserFactory;
     private static SAXParserFactory validatingSAXParserFactory;
 
-    public static final String XML_CONTENT_TYPE1 = "text/xml";
-    public static final String XML_CONTENT_TYPE2 = "application/xml";
-    public static final String XML_CONTENT_TYPE3_SUFFIX = "+xml";
-    public static final String XML_CONTENT_TYPE = XML_CONTENT_TYPE2;
-    public static final String TEXT_CONTENT_TYPE_PREFIX = "text/";
+    private static FileItemFactory fileItemFactory;
 
     static {
         try {
+            // Enable XInclude
+            //
+//            System.setProperty("orbeon.apache.xerces.xni.parser.XMLParserConfiguration",
+//                    "org.orbeon.oxf.xml.XIncludeParserConfiguration");
+
             // Create factory
             documentBuilderFactory = (DocumentBuilderFactory) Class.forName
                     ("orbeon.apache.xerces.jaxp.DocumentBuilderFactoryImpl").newInstance();
@@ -161,6 +149,10 @@ public class XMLUtils {
         }
     }
 
+    public static SAXParser newSAXParser() {
+        return newSAXParser(false, true);
+    }
+
     /**
      * Get a SAXParserFactory to build combinations of validating and XInclude-aware SAXParser.
      *
@@ -199,25 +191,9 @@ public class XMLUtils {
      * @param handleXInclude    whether the parser is XInclude-aware
      * @return                  the SAXParser
      */
-    private static synchronized SAXParser newSAXParser(boolean validating, boolean handleXInclude) {
+    public static synchronized SAXParser newSAXParser(boolean validating, boolean handleXInclude) {
         try {
             return getSAXParserFactory(validating, handleXInclude).newSAXParser();
-        } catch (Exception e) {
-            throw new OXFException(e);
-        }
-    }
-
-    public static SAXParser newSAXParser() {
-        return newSAXParser(DEFAULT_VALIDATING, DEFAULT_HANDLE_XINCLUDE);
-    }
-
-    public static XMLReader newXMLReader(boolean validating, boolean handleXInclude) {
-        final SAXParser saxParser = XMLUtils.newSAXParser(validating, handleXInclude);
-        try {
-            final XMLReader xmlReader = saxParser.getXMLReader();
-            xmlReader.setEntityResolver(XMLUtils.ENTITY_RESOLVER);
-            xmlReader.setErrorHandler(XMLUtils.ERROR_HANDLER);
-            return xmlReader;
         } catch (Exception e) {
             throw new OXFException(e);
         }
@@ -263,74 +239,17 @@ public class XMLUtils {
         }
     }
 
-    /**
-     * Convert dom4j attributes to SAX attributes.
-     *
-     * @param element   dom4j Element
-     * @return          SAX Attributes
-     */
-    public static Attributes convertAttributes(Element element) {
-        final AttributesImpl result = new AttributesImpl();
-        for (Iterator i = element.attributeIterator(); i.hasNext();) {
-            final org.dom4j.Attribute attribute = (org.dom4j.Attribute) i.next();
-
-            result.addAttribute(attribute.getNamespaceURI(), attribute.getName(), attribute.getQualifiedName(),
-                    ContentHandlerHelper.CDATA, attribute.getValue());
-        }
-        return result;
-    }
-
-    /**
-     * Return whether the given mediatype is considered as XML.
-     *
-     * TODO: This does test on the mediatype only, but we need one to check the content type as well for the case
-     * "text/html; charset=foobar"
-     *
-     * @param mediatype mediatype or null
-     * @return          true if not null and XML mediatype, false otherwise
-     */
-    public static boolean isXMLMediatype(String mediatype) {
-        if (mediatype == null)
-            return false;
-        return mediatype.equals(XML_CONTENT_TYPE1)
-                || mediatype.equals(XML_CONTENT_TYPE2)
-                || mediatype.endsWith(XML_CONTENT_TYPE3_SUFFIX);
-    }
-
-    public static boolean isTextContentType(String contentType) {
-        return contentType != null && contentType.startsWith(TEXT_CONTENT_TYPE_PREFIX);
-    }
-
-    /**
-     * Given an input stream, return a reader. This performs encoding detection as per the XML spec. Caller must close
-     * the resulting Reader when done.
-     *
-     * @param uri           resource URI (probably unneeded)
-     * @param inputStream   InputStream to process
-     * @return              Reader initialized with the proper encoding
-     * @throws IOException
-     */
-    public static Reader getReaderFromXMLInputStream(String uri, InputStream inputStream) throws IOException {
-        // Create a Xerces XMLInputSource
-        final XMLInputSource inputSource = new XMLInputSource(uri, null, null, inputStream, null);
-        // Obtain encoding from Xerces
-        final XMLEntityManager entityManager = new XMLEntityManager();
-        entityManager.setProperty(Constants.XERCES_PROPERTY_PREFIX + Constants.ERROR_REPORTER_PROPERTY, new XMLErrorReporter());// prevent NPE by providing this
-        entityManager.setupCurrentEntity("[xml]", inputSource, false, true);// the result is the encoding, but we don't use it directly
-
-        return entityManager.getCurrentEntity().reader;
-    }
-
-    public static class EntityResolver implements org.xml.sax.EntityResolver {
-        public InputSource resolveEntity(String publicId, String systemId) throws SAXException, IOException {
-            final InputSource is = new InputSource();
-            is.setSystemId(systemId);
-            is.setPublicId(publicId);
-            final URL url = URLFactory.createURL(systemId);
-            is.setByteStream(url.openConnection().getInputStream());
-            return is;
-        }
-    }
+//    public static class EntityResolver implements org.xml.sax.EntityResolver {
+//        public InputSource resolveEntity(String publicId, String systemId)
+//                throws SAXException, IOException {
+//            InputSource is = new InputSource();
+//            is.setSystemId(systemId);
+//            is.setPublicId(publicId);
+//            final URL url = URLFactory.createURL(systemId);
+//            is.setByteStream(url.openConnection().getInputStream());
+//            return is;
+//        }
+//    }
 
     public static class ErrorHandler implements org.xml.sax.ErrorHandler {
         public void error(SAXParseException exception) throws SAXException {
@@ -361,133 +280,57 @@ public class XMLUtils {
         }
     }
 
-    /**
-     * Parse a string into SAX events. If the string is empty or only contains white space, output an empty document.
-     *
-     * @param xml               XML string
-     * @param systemId          system id of the document, or null
-     * @param contentHandler    SAX content handler to output to
-     * @param validating        whether validation must be performed
-     * @param handleXInclude    whether XInclude must be performed
-     */
     public static void stringToSAX(String xml, String systemId, ContentHandler contentHandler, boolean validating, boolean handleXInclude) {
-        if (xml.trim().equals("")) {
-            try {
-                contentHandler.startDocument();
-                contentHandler.endDocument();
-            } catch (SAXException e) {
-                throw new OXFException(e);
-            }
-        } else {
-            readerToSAX(new StringReader(xml), systemId, contentHandler, validating, handleXInclude);
-        }
-    }
-
-    /**
-     * Read a URL into SAX events.
-     *
-     * @param systemId          system id of the document
-     * @param contentHandler    SAX content handler to output to
-     * @param validating        whether validation must be performed
-     * @param handleXInclude    whether XInclude must be performed
-     */
-    public static void urlToSAX(String systemId, ContentHandler contentHandler, boolean validating, boolean handleXInclude) {
-        try {
-            final URL url = URLFactory.createURL(systemId);
-            final InputStream is = url.openStream();
-            final InputSource inputSource = new InputSource(is);
-            inputSource.setSystemId(systemId);
-            try {
-                inputSourceToSAX(inputSource, contentHandler, validating, handleXInclude);
-            } finally {
-                is.close();
-            }
-        } catch (IOException e) {
-            throw new OXFException(e);
-        }
+        readerToSAX(new StringReader(xml), systemId, contentHandler, validating, handleXInclude);
     }
 
     public static void inputStreamToSAX(InputStream inputStream, String systemId, ContentHandler contentHandler, boolean validating, boolean handleXInclude) {
-        final InputSource inputSource = new InputSource(inputStream);
+        InputSource inputSource = new InputSource(inputStream);
         inputSource.setSystemId(systemId);
         inputSourceToSAX(inputSource, contentHandler, validating, handleXInclude);
     }
 
     public static void readerToSAX(Reader reader, String systemId, ContentHandler contentHandler, boolean validating, boolean handleXInclude) {
-        final InputSource inputSource = new InputSource(reader);
+        InputSource inputSource = new InputSource(reader);
         inputSource.setSystemId(systemId);
         inputSourceToSAX(inputSource, contentHandler, validating, handleXInclude);
     }
 
     private static void inputSourceToSAX(InputSource inputSource, ContentHandler contentHandler, boolean validating, boolean handleXInclude) {
         try {
-            final XMLReader xmlReader = newSAXParser(validating, handleXInclude).getXMLReader();
+            XMLReader xmlReader = newSAXParser(validating, handleXInclude).getXMLReader();
             xmlReader.setContentHandler(contentHandler);
             xmlReader.setEntityResolver(ENTITY_RESOLVER);
             xmlReader.setErrorHandler(ERROR_HANDLER);
             xmlReader.parse(inputSource);
         } catch (SAXParseException e) {
             throw new ValidationException(e.getMessage(), new LocationData(e));
-        } catch (Exception e) {
+        } catch (SAXException e) {
+            throw new OXFException(e);
+        } catch (IOException e) {
             throw new OXFException(e);
         }
     }
 
-    /**
-     * Return whether the given string contains well-formed XML.
-     *
-     * @param xmlString     string to check
-     * @return              true iif the given string contains well-formed XML
-     */
-    public static boolean isWellFormedXML(String xmlString) {
-
-        // Empty string is never well-formed XML
-        if (xmlString.trim().length() == 0)
-            return false;
-
+    public static Document fileToDOM(File xmlFile) {
         try {
-            final XMLReader xmlReader = newSAXParser(false, false).getXMLReader();
-            xmlReader.setContentHandler(NULL_CONTENT_HANDLER);
-            xmlReader.setEntityResolver(ENTITY_RESOLVER);
-            xmlReader.setErrorHandler(new org.xml.sax.ErrorHandler() {
-                public void error(SAXParseException exception) throws SAXException {
-                    throw exception;
-                }
-
-                public void fatalError(SAXParseException exception) throws SAXException {
-                    throw exception;
-                }
-
-                public void warning(SAXParseException exception) throws SAXException {
-                }
-            });
-            xmlReader.parse(new InputSource(new StringReader(xmlString)));
-            return true;
-        } catch (Exception e) {
-            // Ideally we would like the parser to not throw as this is time-consuming, but not sure how to achieve that
-            return false;
+            return getThreadDocumentBuilder().parse(new InputSource(new FileReader(xmlFile)));
+        } catch (SAXException e) {
+            throw new OXFException(e);
+        } catch (IOException e) {
+            throw new OXFException(e);
         }
     }
 
-//    public static Document fileToDOM(File xmlFile) {
-//        try {
-//            return getThreadDocumentBuilder().parse(new InputSource(new FileReader(xmlFile)));
-//        } catch (SAXException e) {
-//            throw new OXFException(e);
-//        } catch (IOException e) {
-//            throw new OXFException(e);
-//        }
-//    }
-//
-//    public static Document base64ToDOM(String base64) {
-//        try {
-//            return getThreadDocumentBuilder().parse(new InputSource(new ByteArrayInputStream(Base64.decode(base64))));
-//        } catch (SAXException e) {
-//            throw new OXFException(e);
-//        } catch (IOException e) {
-//            throw new OXFException(e);
-//        }
-//    }
+    public static Document base64ToDOM(String base64) {
+        try {
+            return getThreadDocumentBuilder().parse(new InputSource(new ByteArrayInputStream(Base64.decode(base64))));
+        } catch (SAXException e) {
+            throw new OXFException(e);
+        } catch (IOException e) {
+            throw new OXFException(e);
+        }
+    }
 
     /**
      * Associated one DocumentBuilder per thread. This is so we avoid synchronizing (parse() for
@@ -497,15 +340,15 @@ public class XMLUtils {
      */
     private static DocumentBuilder getThreadDocumentBuilder() {
         Thread thread = Thread.currentThread();
-        DocumentBuilder documentBuilder = (documentBuilders == null) ? null : documentBuilders.get(thread);
+        DocumentBuilder documentBuilder = (documentBuilders == null) ? null : (DocumentBuilder) documentBuilders.get(thread);
         // Try a first test outside the synchronized block
         if (documentBuilder == null) {
             synchronized (documentBuilderFactory) {
                 // Redo the test within the synchronized block
-                documentBuilder = (documentBuilders == null) ? null : documentBuilders.get(thread);
+                documentBuilder = (documentBuilders == null) ? null : (DocumentBuilder) documentBuilders.get(thread);
                 if (documentBuilder == null) {
                     if (documentBuilders == null)
-                        documentBuilders = new HashMap<Thread, DocumentBuilder>();
+                        documentBuilders = new HashMap();
                     documentBuilder = newDocumentBuilder();
                     documentBuilders.put(thread, documentBuilder);
                 }
@@ -584,9 +427,9 @@ public class XMLUtils {
         }
     }
 
-//    public static DigestContentHandler getDigestContentHandler(String algorithm) {
-//        return new DigestContentHandler(algorithm);
-//    }
+    public static DigestContentHandler getDigestContentHandler(String algorithm) {
+        return new DigestContentHandler(algorithm);
+    }
 
     /**
      * This digester is based on some existing public document (not sure which). There are some
@@ -891,9 +734,9 @@ public class XMLUtils {
 
     public static void parseDocumentFragment(Reader reader, ContentHandler contentHandler) throws SAXException {
         try {
-            final XMLReader xmlReader = newSAXParser().getXMLReader();
+            XMLReader xmlReader = newSAXParser().getXMLReader();
             xmlReader.setContentHandler(new XMLFragmentContentHandler(contentHandler));
-            final ArrayList<Reader> readers = new ArrayList<Reader>(3);
+            ArrayList readers = new ArrayList(3);
             readers.add(new StringReader("<root>"));
             readers.add(reader);
             readers.add(new StringReader("</root>"));
@@ -906,7 +749,7 @@ public class XMLUtils {
     public static void parseDocumentFragment(String fragment, ContentHandler contentHandler) throws SAXException {
         if (fragment.indexOf("<") != -1 || fragment.indexOf("&") != -1) {
             try {
-                final XMLReader xmlReader = newSAXParser().getXMLReader();
+                XMLReader xmlReader = newSAXParser().getXMLReader();
                 xmlReader.setContentHandler(new XMLFragmentContentHandler(contentHandler));
                 xmlReader.parse(new InputSource(new StringReader("<root>" + fragment + "</root>")));
             } catch (IOException e) {
@@ -944,54 +787,54 @@ public class XMLUtils {
         }
     }
 
-//    /**
-//     * Iterator over DOM Attributes.
-//     *
-//     * The object returned is of type XMLUtils.Attribute.
-//     */
-//    public static class AttributesIterator implements Iterator {
-//
-//        private Attributes attributes;
-//        private int size;
-//        private int currentIndex;
-//
-//        public AttributesIterator(Attributes attributes) {
-//            this.attributes = attributes;
-//            size = attributes.getLength();
-//            currentIndex = 0;
-//        }
-//
-//        public boolean hasNext() {
-//            return currentIndex < size;
-//        }
-//
-//        public Object next() {
-//            if (!hasNext())
-//                throw new NoSuchElementException();
-//            final int _currentIndex = currentIndex++;
-//            return new Attribute() {
-//                public String getURI() {
-//                    return attributes.getURI(_currentIndex);
-//                }
-//
-//                public String getLocalName() {
-//                    return attributes.getLocalName(_currentIndex);
-//                }
-//
-//                public String getQName() {
-//                    return attributes.getQName(_currentIndex);
-//                }
-//
-//                public String getValue() {
-//                    return attributes.getValue(_currentIndex);
-//                }
-//            };
-//        }
-//
-//        public void remove() {
-//            throw new UnsupportedOperationException();
-//        }
-//    }
+    /**
+     * Iterator over DOM Attributes.
+     *
+     * The object returned is of type XMLUtils.Attribute.
+     */
+    public static class AttributesIterator implements Iterator {
+
+        private Attributes attributes;
+        private int size;
+        private int currentIndex;
+
+        public AttributesIterator(Attributes attributes) {
+            this.attributes = attributes;
+            size = attributes.getLength();
+            currentIndex = 0;
+        }
+
+        public boolean hasNext() {
+            return currentIndex < size;
+        }
+
+        public Object next() {
+            if (!hasNext())
+                throw new NoSuchElementException();
+            final int _currentIndex = currentIndex++;
+            return new Attribute() {
+                public String getURI() {
+                    return attributes.getURI(_currentIndex);
+                }
+
+                public String getLocalName() {
+                    return attributes.getLocalName(_currentIndex);
+                }
+
+                public String getQName() {
+                    return attributes.getQName(_currentIndex);
+                }
+
+                public String getValue() {
+                    return attributes.getValue(_currentIndex);
+                }
+            };
+        }
+
+        public void remove() {
+            throw new UnsupportedOperationException();
+        }
+    }
 
     /**
      * Convert an Object to a String and generate SAX characters events.
@@ -1034,11 +877,142 @@ public class XMLUtils {
     public static void inputStreamToBase64Characters(InputStream is, ContentHandler contentHandler) {
 
         try {
-            final OutputStream os = new ContentHandlerOutputStream(contentHandler);
+            // NOTE: New implementation based on ContentHandlerOutputStream
+            OutputStream os = new ContentHandlerOutputStream(contentHandler);
             NetUtils.copyStream(new BufferedInputStream(is), os);
             os.close(); // necessary with ContentHandlerOutputStream to make sure all extra characters are written
         } catch (Exception e) {
             throw new OXFException(e);
+        }
+    }
+
+    public static byte[] base64StringToByteArray(String base64String) {
+        return Base64.decode(base64String);
+    }
+
+    /**
+     * Convert a String in xs:base64Binary to an xs:anyURI.
+     *
+     * NOTE: The implementation creates a temporary file. The Pipeline Context is required so
+     * that the file can be deleted when no longer used.
+     */
+    public static String base64BinaryToAnyURI(PipelineContext pipelineContext, String value) {
+        // Convert Base64 to binary first
+        byte[] bytes = XMLUtils.base64StringToByteArray(value);
+
+        return inputStreamToAnyURI(pipelineContext, new ByteArrayInputStream(bytes));
+    }
+
+    /**
+     * Convert an InputStream to an xs:anyURI.
+     *
+     * NOTE: The implementation creates a temporary file. The Pipeline Context is required so
+     * that the file can be deleted when no longer used.
+     */
+    public static String inputStreamToAnyURI(PipelineContext pipelineContext, InputStream inputStream) {
+        // Get FileItem
+        final FileItem fileItem = prepareFileItem(pipelineContext);
+        // Write to file
+        OutputStream os = null;
+        try {
+            os = fileItem.getOutputStream();
+            NetUtils.copyStream(inputStream, os);
+        } catch (IOException e) {
+            throw new OXFException(e);
+        } finally {
+            if (os != null) {
+                try {
+                    os.close();
+                } catch (IOException e) {
+                    throw new OXFException(e);
+                }
+            }
+        }
+        // Create file if it doesn't exist (necessary when the file size is 0)
+        final File storeLocation = ((DefaultFileItem) fileItem).getStoreLocation();
+        try {
+            storeLocation.createNewFile();
+        } catch (IOException e) {
+            throw new OXFException(e);
+        }
+        // Return a file URL
+        return storeLocation.toURI().toString();
+    }
+
+    /**
+     * Return a FileItem which is going to be automatically destroyed upon context destruction.
+     */
+    public static FileItem prepareFileItem(PipelineContext pipelineContext) {
+        // We use the commons fileupload utilities to save a file
+        if (fileItemFactory == null)
+            fileItemFactory = new DefaultFileItemFactory(0, SystemUtils.getTemporaryDirectory());
+        final FileItem fileItem = fileItemFactory.createItem("dummy", "dummy", false, null);
+        // Make sure the file is deleted when the context is destroyed
+        pipelineContext.addContextListener(new PipelineContext.ContextListenerAdapter() {
+            public void contextDestroyed(boolean success) {
+                try {
+                    // Log when we delete files, as there is a transient issue with temporary files
+                    // that seem to be deleted too early.
+                    if (logger.isDebugEnabled()) {
+                        final String temporaryFileName = ((DeferredFileOutputStream) fileItem.getOutputStream()).getFile().getAbsolutePath();
+                        logger.debug("Deleting temporary file: " + temporaryFileName);
+                    }
+                    fileItem.delete();
+                } catch (IOException e) {
+                    throw new OXFException(e);
+                }
+            }
+        });
+        // Return FileItem object
+        return fileItem;
+    }
+
+    /**
+     * Convert a String in xs:anyURI to an xs:base64Binary.
+     *
+     * The URI has to be a URL. It is read entirely
+     */
+    public static String anyURIToBase64Binary(String value) {
+        InputStream is = null;
+        try {
+            // Read from URL and convert to Base64
+            is = new URL(value).openStream();
+            final StringBuffer sb = new StringBuffer();
+            XMLUtils.inputStreamToBase64Characters(is, new ContentHandlerAdapter() {
+                public void characters(char ch[], int start, int length) {
+                    sb.append(ch, start, length);
+                }
+            });
+            // Return Base64 String
+            return sb.toString();
+        } catch (IOException e) {
+            throw new OXFException(e);
+        } finally {
+            if (is != null) {
+                try {
+                    is.close();
+                } catch (IOException e) {
+                    throw new OXFException(e);
+                }
+            }
+        }
+    }
+
+    public static void anyURIToOutputStream(String value, OutputStream outputStream) {
+        InputStream is = null;
+        try {
+            is = new URL(value).openStream();
+            NetUtils.copyStream(is, outputStream);
+        } catch (IOException e) {
+            throw new OXFException(e);
+        } finally {
+            if (is != null) {
+                try {
+                    is.close();
+                } catch (IOException e) {
+                    throw new OXFException(e);
+                }
+            }
         }
     }
 
@@ -1088,44 +1062,6 @@ public class XMLUtils {
         return str;
     }
 
-    public static org.dom4j.Document cleanXML(org.dom4j.Document doc, String stylesheetURL) {
-      try {
-        final org.dom4j.Element element = doc.getRootElement();
-        final String systemId = Dom4jUtils.makeSystemId(element);
-        // The date to clean
-        final DOMGenerator dataToClean = new DOMGenerator(doc, "clean xml", DOMGenerator.ZeroValidity, systemId);
-        // The stylesheet
-        URLGenerator stylesheetGenerator = new URLGenerator(stylesheetURL);
-        // The transformation
-        // Define the name of the processor (this is a QName)
-        final QName processorName = new QName("xslt", XMLConstants.OXF_PROCESSORS_NAMESPACE);
-        // Get a factory for this processor
-        final ProcessorFactory processorFactory = ProcessorFactoryRegistry.lookup(processorName);
-        if (processorFactory == null)
-          throw new OXFException("Cannot find processor factory with name '"
-                                 + processorName.getNamespacePrefix() + ":" + processorName.getName() + "'");
-
-        // Create processor
-        final Processor xsltProcessor = processorFactory.createInstance();
-        // Where the result goes
-        DOMSerializer transformationOutput = new DOMSerializer();
-
-        // Connect
-        PipelineUtils.connect(stylesheetGenerator, "data", xsltProcessor, "config");
-        PipelineUtils.connect(dataToClean, "data", xsltProcessor, "data");
-        PipelineUtils.connect(xsltProcessor, "data", transformationOutput, "data");
-
-        // Run the pipeline
-        PipelineContext pipelineContext = new PipelineContext();
-        transformationOutput.start(pipelineContext);
-        // Get the output
-        return transformationOutput.getDocument(pipelineContext);
-      }
-      catch(Exception e) {
-        throw new OXFException(e);
-      }
-    }
-
     public static String toString(final Locator loc) {
         return loc.getSystemId() + ", line " + loc.getLineNumber() + ", column "
                 + loc.getColumnNumber();
@@ -1154,7 +1090,7 @@ public class XMLUtils {
      * @return new AttributesImpl containing  all attribs that were in src attribs and that were
      *         in the default name space.
      */
-    public static AttributesImpl getAttributesFromDefaultNamespace(final Attributes atts) {
+    public static AttributesImpl getAttribsFromDefaultNamespace(final Attributes atts) {
         final AttributesImpl ret = new AttributesImpl();
         final int size = atts.getLength();
         for (int i = 0; i < size; i++) {
@@ -1169,15 +1105,8 @@ public class XMLUtils {
         return ret;
     }
 
-    public static Attributes appendToClassAttribute(Attributes attributes, String newClasses) {
-        final String oldAttribute = attributes.getValue("class");
-        final String newAttribute = oldAttribute == null ? newClasses : oldAttribute + ' ' + newClasses;
-        return addOrReplaceAttribute(attributes, "", "", "class", newAttribute);
-    }
-
-    public static AttributesImpl addOrReplaceAttribute(Attributes attributes, String uri, String prefix, String localname, String value) {
+    public static Attributes addOrReplaceAttribute(Attributes attributes, String uri, String prefix, String localname, String value) {
         final AttributesImpl newAttributes = new AttributesImpl();
-        boolean replaced = false;
         for (int i = 0; i < attributes.getLength(); i++) {
             final String attributeURI = attributes.getURI(i);
             final String attributeValue = attributes.getValue(i);
@@ -1185,30 +1114,10 @@ public class XMLUtils {
             final String attributeQName = attributes.getQName(i);
             final String attributeLocalname = attributes.getLocalName(i);
 
-            if (uri.equals(attributeURI) && localname.equals(attributeLocalname)) {
-                // Found existing attribute
-                replaced = true;
-                newAttributes.addAttribute(uri, localname, XMLUtils.buildQName(prefix, localname), ContentHandlerHelper.CDATA, value);
-            } else {
-                // Not a matched attribute
+            if (!(uri.equals(attributeURI) && localname.equals(attributeLocalname)))
                 newAttributes.addAttribute(attributeURI, attributeLocalname, attributeQName, attributeType, attributeValue);
-            }
         }
-        if (!replaced) {
-            // Attribute did not exist already so add it
-            newAttributes.addAttribute(uri, localname, XMLUtils.buildQName(prefix, localname), ContentHandlerHelper.CDATA, value);
-        }
+        newAttributes.addAttribute(uri, localname, XMLUtils.buildQName(prefix, localname), ContentHandlerHelper.CDATA, value);
         return newAttributes;
-    }
-
-    public static void streamNullDocument(ContentHandler contentHandler) throws SAXException {
-        contentHandler.startDocument();
-        contentHandler.startPrefixMapping(XMLConstants.XSI_PREFIX, XMLConstants.XSI_URI);
-        final AttributesImpl attributes = new AttributesImpl();
-        attributes.addAttribute(XMLConstants.XSI_URI, "nil", "xsi:nil", "CDATA", "true");
-        contentHandler.startElement("", "null", "null", attributes);
-        contentHandler.endElement("", "null", "null");
-        contentHandler.endPrefixMapping(XMLConstants.XSI_PREFIX);
-        contentHandler.endDocument();
     }
 }
